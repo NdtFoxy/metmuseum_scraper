@@ -2,9 +2,10 @@ FROM python:3.9-slim-buster
 
 WORKDIR /app
 
-COPY Main_v4.py .
+COPY requirements.txt .
 
-RUN pip install requests beautifulsoup4 lxml urllib3
-RUN pip install pysocks
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "Main_v4.py"]
+COPY Main_v4.py config.yaml ./
+
+CMD ["python", "Main_v4.py", "run"]
