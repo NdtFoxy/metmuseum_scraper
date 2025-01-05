@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY Main_v4.py config.yaml ./
 
-CMD ["python", "Main_v4.py", "run"]
+CMD ["tail", "-f", "/dev/null"]
