@@ -17,9 +17,7 @@ proxy_list:
 total_pages: 67
 log_dir: "Logs"
 log_level: "DEBUG"
-log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-date_format: "%Y-%m-%d %H:%M:%S"
 max_retries: 3
 retry_delay: 5
 min_request_delay: 1
-max_request_delay: 5
+max_request_delay: 3

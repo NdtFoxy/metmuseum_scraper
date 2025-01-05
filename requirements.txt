@@ -5,3 +5,4 @@ urllib3
 pysocks
 tqdm
 pyyaml
+python-json-logger

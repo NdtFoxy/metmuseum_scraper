@@ -11,6 +11,7 @@ import logging
 from tqdm import tqdm
 import argparse
 import yaml
+from pythonjsonlogger import jsonlogger
 
 # Suppress warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -46,7 +47,7 @@ def handle_interrupt(signal_received, frame):
     """Handles Ctrl+C or other interruptions."""
     global stop_execution
     global logger
-    logger.info("\nScript interrupted. Saving progress...")
+    logger.info("Script interrupted. Saving progress...")
     stop_execution = True
 
 signal.signal(signal.SIGINT, handle_interrupt)
@@ -61,27 +62,28 @@ def get_session(proxy):
     return session
 
 def setup_logging():
-    """Configures logging based on settings from config.yaml."""
+    """Configures logging to use JSON format."""
+    global logger
     log_dir = config.get("log_dir", "Logs")
     log_level = getattr(logging, config.get("log_level", "DEBUG").upper())
-    log_format = config.get("log_format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    date_format = config.get("date_format", "%Y-%m-%d %H:%M:%S")
-
+    
     os.makedirs(log_dir, exist_ok=True)
     session_num = 1
     while True:
-        log_filename = os.path.join(log_dir, f"Logs_Session_{session_num}.log")
+        log_filename = os.path.join(log_dir, f"Logs_Session_{session_num}.json")  # Use .json extension
         if not os.path.exists(log_filename):
             break
         session_num += 1
 
-    logging.basicConfig(
-        filename=log_filename,
-        level=log_level,
-        format=log_format,
-        datefmt=date_format,
-    )
-    return logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(log_level)
+
+    log_handler = logging.FileHandler(log_filename)
+    formatter = jsonlogger.JsonFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+    
+    return logger
 
 def create_gitignore(folder_path):
     """Creates a .gitignore file in the specified folder to ignore all files except the .gitignore itself."""
@@ -96,8 +98,8 @@ def create_gitignore(folder_path):
 def process_page(proxy, count_page, pbar):
     """Processes a single page of artifacts, fetches data, and saves it to JSON and images."""
     global logger
-    logger.info(f"Starting processing page {count_page} with proxy {proxy['ip']}:{proxy['port']} (Country: {proxy['country_code']})")
-    
+    logger.info(json.dumps({"message": f"Starting processing page {count_page}", "proxy": f"{proxy['ip']}:{proxy['port']}", "country": proxy['country_code']}))
+
     min_delay = config.get("min_request_delay", 1)
     max_delay = config.get("max_request_delay", 3)
     time.sleep(random.uniform(min_delay, max_delay))
@@ -106,7 +108,7 @@ def process_page(proxy, count_page, pbar):
     page_json_path = os.path.join(json_folder, f"Page_{count_page}_data.json")
 
     if os.path.exists(page_json_path):
-        logger.info(f"Data for page {count_page} already exists. Skipping...")
+        logger.info(json.dumps({"message": f"Data for page {count_page} already exists. Skipping...", "page": count_page}))
         pbar.update(1)
         return
 
@@ -120,15 +122,15 @@ def process_page(proxy, count_page, pbar):
             req = session.get(url, headers=headers, verify=False, timeout=15)
             req.raise_for_status()
             src = req.text
-            logger.info(f"Successfully fetched page {count_page} on attempt {attempt + 1}")
+            logger.info(json.dumps({"message": f"Successfully fetched page {count_page}", "page": count_page, "attempt": attempt + 1}))
             break
         except requests.RequestException as e:
-            logger.warning(f"Attempt {attempt + 1} failed for page {count_page}: {e}")
+            logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed for page {count_page}", "page": count_page, "error": str(e)}))
             if attempt < max_retries - 1:
-                logger.info(f"Retrying in {retry_delay} seconds...")
+                logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "attempt": attempt + 1, "delay": retry_delay}))
                 time.sleep(retry_delay)
             else:
-                logger.error(f"Failed to fetch page {count_page} after {max_retries} attempts")
+                logger.error(json.dumps({"message": f"Failed to fetch page {count_page} after {max_retries} attempts", "page": count_page, "attempts": max_retries}))
                 pbar.update(1)
                 return
 
@@ -139,7 +141,7 @@ def process_page(proxy, count_page, pbar):
     artifacts_data = []
     page_images_folder = os.path.join(output_folder, f"Page_{count_page}")
     os.makedirs(page_images_folder, exist_ok=True)
-    create_gitignore(page_images_folder) # Create .gitignore in the image folder
+    create_gitignore(page_images_folder)
 
     for href in array:
         if stop_execution:
@@ -151,15 +153,15 @@ def process_page(proxy, count_page, pbar):
                 req = session.get(href, headers=headers, verify=False, timeout=15)
                 req.raise_for_status()
                 page_src = req.text
-                logger.info(f"Successfully fetched artifact details from {href} on attempt {attempt + 1}")
+                logger.info(json.dumps({"message": f"Successfully fetched artifact details from {href}", "page": count_page, "artifact": href, "attempt": attempt + 1}))
                 break
             except requests.RequestException as e:
-                logger.warning(f"Attempt {attempt + 1} failed to fetch artifact details from {href}: {e}")
+                logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed to fetch artifact details from {href}", "page": count_page, "artifact": href, "error": str(e)}))
                 if attempt < max_retries - 1:
-                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "artifact": href, "attempt": attempt + 1, "delay": retry_delay}))
                     time.sleep(retry_delay)
                 else:
-                    logger.error(f"Failed to fetch artifact details from {href} after {max_retries} attempts")
+                    logger.error(json.dumps({"message": f"Failed to fetch artifact details from {href} after {max_retries} attempts", "page": count_page, "artifact": href, "attempts": max_retries}))
                     break
         else:
             continue
@@ -216,15 +218,15 @@ def process_page(proxy, count_page, pbar):
                         img_data = session.get(img_url, headers=headers, verify=False, timeout=15).content
                         with open(image_path, "wb") as img_file:
                             img_file.write(img_data)
-                        logger.info(f"Successfully saved image {img_url} on attempt {attempt + 1}")
+                        logger.info(json.dumps({"message": f"Successfully saved image {img_url}", "page": count_page, "artifact": href, "image": img_url, "attempt": attempt + 1}))
                         break
                     except Exception as e:
-                        logger.warning(f"Attempt {attempt + 1} failed to save image {img_url}: {e}")
+                        logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed to save image {img_url}", "page": count_page, "artifact": href, "image": img_url, "error": str(e)}))
                         if attempt < max_retries - 1:
-                            logger.info(f"Retrying in {retry_delay} seconds...")
+                            logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "artifact": href, "image": img_url, "attempt": attempt + 1, "delay": retry_delay}))
                             time.sleep(retry_delay)
                         else:
-                            logger.error(f"Failed to save image {img_url} after {max_retries} attempts")
+                            logger.error(json.dumps({"message": f"Failed to save image {img_url} after {max_retries} attempts", "page": count_page, "artifact": href, "image": img_url, "attempts": max_retries}))
                             break
 
         artifacts_data.append(art_details)
@@ -233,7 +235,7 @@ def process_page(proxy, count_page, pbar):
         with open(page_json_path, "w", encoding="utf-8") as file:
             json.dump(artifacts_data, file, indent=4, ensure_ascii=False)
 
-    logger.info(f"Page {count_page} is ready")
+    logger.info(json.dumps({"message": f"Page {count_page} is ready", "page": count_page}))
     pbar.update(1)
 
 def main():
@@ -353,7 +355,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    load_config() # Load configuration before running
+    load_config()
 
     if args.command == "help":
         help_command()
