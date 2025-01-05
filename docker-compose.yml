@@ -9,20 +9,3 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    # networks:
-    #   - proxy_network
-
-  # proxy_cz_1:
-  #   image: appropriate_proxy_image
-  #   container_name: proxy_cz_1
-  #   ports:
-  #     - "11001:11001"
-  #   environment:
-  #     - PROXY_USERNAME=jTphN8YKiI_0
-  #     - PROXY_PASSWORD=kV7JwDpIJXuc
-  #   networks:
-  #     - proxy_network
-
-# networks:
-#   proxy_network:
-#     driver: bridge
