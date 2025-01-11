@@ -25,4 +25,4 @@ services:
         max-size: "10m"
         max-file: "5"
         compress: "true"
-    command: python Main_v4.py run
+    command: ["python", "Main_v4.py", "run"]
