@@ -8,6 +8,7 @@ services:
       - ./Save_Data:/app/Save_Data
       - ./Logs:/app/Logs
       - ./config.yaml:/app/config.yaml
+      - ./Main_v4.py:/app/Main_v4.py  # Основной скрипт
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
@@ -25,4 +26,5 @@ services:
         max-size: "10m"
         max-file: "5"
         compress: "true"
-    command: ["python", "Main_v4.py", "run"]
+    # Контейнер запускается в фоновом режиме и ждет команд через exec
+    command: ["tail", "-f", "/dev/null"]
