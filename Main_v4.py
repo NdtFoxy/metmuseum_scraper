@@ -22,6 +22,7 @@ url_base = ""
 headers = {}
 output_folder = ""
 json_folder = ""
+image_folder = ""  # New variable for the image folder
 proxy_list = []
 total_pages = 0
 
@@ -30,7 +31,7 @@ logger = None  # Initialize logger globally
 
 def load_config(config_path="config.yaml"):
     """Loads the configuration from a YAML file."""
-    global config, url_base, headers, output_folder, json_folder, proxy_list, total_pages
+    global config, url_base, headers, output_folder, json_folder, image_folder, proxy_list, total_pages
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -38,16 +39,19 @@ def load_config(config_path="config.yaml"):
     headers = config["headers"]
     output_folder = config["output_folder"]
     json_folder = os.path.join(output_folder, "json")
+    image_folder = os.path.join(output_folder, "image")  # Define the image folder path
     proxy_list = config["proxy_list"]
     total_pages = config["total_pages"]
 
     os.makedirs(json_folder, exist_ok=True)
+    os.makedirs(image_folder, exist_ok=True)  # Create the image folder
+    create_gitignore(image_folder)
 
 def handle_interrupt(signal_received, frame):
     """Handles Ctrl+C or other interruptions."""
     global stop_execution
     global logger
-    logger.info("Script interrupted. Saving progress...")
+    log_event("info", "interrupt", {"message": "Script interrupted. Saving progress..."})
     stop_execution = True
 
 signal.signal(signal.SIGINT, handle_interrupt)
@@ -62,28 +66,55 @@ def get_session(proxy):
     return session
 
 def setup_logging():
-    """Configures logging to use JSON format."""
+    """Configures JSON logging with detailed fields."""
     global logger
     log_dir = config.get("log_dir", "Logs")
     log_level = getattr(logging, config.get("log_level", "DEBUG").upper())
-    
+
     os.makedirs(log_dir, exist_ok=True)
-    session_num = 1
-    while True:
-        log_filename = os.path.join(log_dir, f"Logs_Session_{session_num}.json")  # Use .json extension
-        if not os.path.exists(log_filename):
-            break
-        session_num += 1
+    log_filename = os.path.join(log_dir, f"log_{time.strftime('%Y%m%d_%H%M%S')}.json")
 
     logger = logging.getLogger(__name__)
     logger.setLevel(log_level)
 
     log_handler = logging.FileHandler(log_filename)
-    formatter = jsonlogger.JsonFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    formatter = jsonlogger.JsonFormatter(
+        "%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
     log_handler.setFormatter(formatter)
     logger.addHandler(log_handler)
-    
+
+    log_event("info", "init", {"message": "Logging initialized", "log_file": log_filename})
     return logger
+
+def log_event(status, action, details=None):
+    """Helper to log events with structured data."""
+    log_data = {
+        "status": status,
+        "action": action,
+        "details": details or {}
+    }
+    logger.info(json.dumps(log_data))
+
+def analyze_logs(log_dir):
+    """Analyzes logs to determine already processed pages and artifacts."""
+    processed_pages = set()
+    failed_pages = set()
+    with os.scandir(log_dir) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.endswith(".json"):
+                with open(entry.path, "r", encoding="utf-8") as log_file:
+                    for line in log_file:
+                        try:
+                            log_entry = json.loads(line.strip())
+                            if log_entry.get("status") == "success" and log_entry.get("action") == "process_page":
+                                processed_pages.add(log_entry["details"]["page_number"])
+                            elif log_entry.get("status") == "failure" and log_entry.get("action") == "fetch_page":
+                                failed_pages.add(log_entry["details"]["page_number"])
+                        except json.JSONDecodeError:
+                            continue
+    return processed_pages, failed_pages
 
 def create_gitignore(folder_path):
     """Creates a .gitignore file in the specified folder to ignore all files except the .gitignore itself."""
@@ -95,22 +126,16 @@ def create_gitignore(folder_path):
             f.write("# Except this file\n")
             f.write("!.gitignore\n")
 
-def process_page(proxy, count_page, pbar):
+def process_page(proxy, count_page, pbar, all_artifacts_data):
     """Processes a single page of artifacts, fetches data, and saves it to JSON and images."""
     global logger
-    logger.info(json.dumps({"message": f"Starting processing page {count_page}", "proxy": f"{proxy['ip']}:{proxy['port']}", "country": proxy['country_code']}))
+    log_event("info", "start_page", {"message": f"Starting processing page {count_page}", "proxy": f"{proxy['ip']}:{proxy['port']}", "country": proxy['country_code'], "page_number": count_page})
 
     min_delay = config.get("min_request_delay", 1)
     max_delay = config.get("max_request_delay", 3)
     time.sleep(random.uniform(min_delay, max_delay))
 
     url = url_base if count_page == 1 else f"{url_base}&offset={(count_page - 1) * 40}"
-    page_json_path = os.path.join(json_folder, f"Page_{count_page}_data.json")
-
-    if os.path.exists(page_json_path):
-        logger.info(json.dumps({"message": f"Data for page {count_page} already exists. Skipping...", "page": count_page}))
-        pbar.update(1)
-        return
 
     session = get_session(proxy)
 
@@ -122,15 +147,14 @@ def process_page(proxy, count_page, pbar):
             req = session.get(url, headers=headers, verify=False, timeout=15)
             req.raise_for_status()
             src = req.text
-            logger.info(json.dumps({"message": f"Successfully fetched page {count_page}", "page": count_page, "attempt": attempt + 1}))
+            log_event("success", "fetch_page", {"page_number": count_page, "url": url, "attempt": attempt + 1})
             break
         except requests.RequestException as e:
-            logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed for page {count_page}", "page": count_page, "error": str(e)}))
+            log_event("retry", "fetch_page", {"page_number": count_page, "url": url, "error": str(e), "attempt": attempt + 1})
             if attempt < max_retries - 1:
-                logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "attempt": attempt + 1, "delay": retry_delay}))
                 time.sleep(retry_delay)
             else:
-                logger.error(json.dumps({"message": f"Failed to fetch page {count_page} after {max_retries} attempts", "page": count_page, "attempts": max_retries}))
+                log_event("failure", "fetch_page", {"page_number": count_page, "url": url, "error": str(e), "attempts": max_retries})
                 pbar.update(1)
                 return
 
@@ -138,14 +162,10 @@ def process_page(proxy, count_page, pbar):
     all_arts_hrefs = soup.find_all(class_="redundant-link_redundantlink__b5TFR")
     array = ["https://www.metmuseum.org" + item.get("href") for item in all_arts_hrefs]
 
-    artifacts_data = []
-    page_images_folder = os.path.join(output_folder, f"Page_{count_page}")
-    os.makedirs(page_images_folder, exist_ok=True)
-    create_gitignore(page_images_folder)
-
+    artifact_counter = 1  # Нумерация артефактов на странице
     for href in array:
         if stop_execution:
-            logger.info("Exiting gracefully.")
+            log_event("info", "interrupt", {"message": "Exiting gracefully."})
             break
 
         for attempt in range(max_retries):
@@ -153,15 +173,14 @@ def process_page(proxy, count_page, pbar):
                 req = session.get(href, headers=headers, verify=False, timeout=15)
                 req.raise_for_status()
                 page_src = req.text
-                logger.info(json.dumps({"message": f"Successfully fetched artifact details from {href}", "page": count_page, "artifact": href, "attempt": attempt + 1}))
+                log_event("success", "fetch_artifact", {"page_number": count_page, "artifact_url": href, "attempt": attempt + 1})
                 break
             except requests.RequestException as e:
-                logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed to fetch artifact details from {href}", "page": count_page, "artifact": href, "error": str(e)}))
+                log_event("retry", "fetch_artifact", {"page_number": count_page, "artifact_url": href, "error": str(e), "attempt": attempt + 1})
                 if attempt < max_retries - 1:
-                    logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "artifact": href, "attempt": attempt + 1, "delay": retry_delay}))
                     time.sleep(retry_delay)
                 else:
-                    logger.error(json.dumps({"message": f"Failed to fetch artifact details from {href} after {max_retries} attempts", "page": count_page, "artifact": href, "attempts": max_retries}))
+                    log_event("failure", "fetch_artifact", {"page_number": count_page, "artifact_url": href, "error": str(e), "attempts": max_retries})
                     break
         else:
             continue
@@ -209,139 +228,133 @@ def process_page(proxy, count_page, pbar):
         if image_links:
             art_details["Image Links"] = image_links
 
-            for idx, img_url in enumerate(image_links):
-                image_name = f"{href.split('/')[-1]}_{idx}.jpg"
-                image_path = os.path.join(page_images_folder, image_name)
+            for img_url in image_links:
+                image_name = f"{count_page}_{artifact_counter}.jpg"
+                image_path = os.path.join(image_folder, image_name)
 
                 for attempt in range(max_retries):
                     try:
                         img_data = session.get(img_url, headers=headers, verify=False, timeout=15).content
                         with open(image_path, "wb") as img_file:
                             img_file.write(img_data)
-                        logger.info(json.dumps({"message": f"Successfully saved image {img_url}", "page": count_page, "artifact": href, "image": img_url, "attempt": attempt + 1}))
+                        log_event("success", "save_image", {"page_number": count_page, "artifact_url": href, "image_url": img_url, "filename": image_name, "attempt": attempt + 1})
                         break
                     except Exception as e:
-                        logger.warning(json.dumps({"message": f"Attempt {attempt + 1} failed to save image {img_url}", "page": count_page, "artifact": href, "image": img_url, "error": str(e)}))
+                        log_event("retry", "save_image", {"page_number": count_page, "artifact_url": href, "image_url": img_url, "error": str(e), "attempt": attempt + 1})
                         if attempt < max_retries - 1:
-                            logger.info(json.dumps({"message": f"Retrying in {retry_delay} seconds...", "page": count_page, "artifact": href, "image": img_url, "attempt": attempt + 1, "delay": retry_delay}))
                             time.sleep(retry_delay)
                         else:
-                            logger.error(json.dumps({"message": f"Failed to save image {img_url} after {max_retries} attempts", "page": count_page, "artifact": href, "image": img_url, "attempts": max_retries}))
+                            log_event("failure", "save_image", {"page_number": count_page, "artifact_url": href, "image_url": img_url, "error": str(e), "attempts": max_retries})
                             break
 
-        artifacts_data.append(art_details)
+        art_details["Source URL"] = href
+        all_artifacts_data.append(art_details)
 
-    if not stop_execution:
-        with open(page_json_path, "w", encoding="utf-8") as file:
-            json.dump(artifacts_data, file, indent=4, ensure_ascii=False)
+        artifact_counter += 1  # Увеличиваем номер артефакта на странице
 
-    logger.info(json.dumps({"message": f"Page {count_page} is ready", "page": count_page}))
+    log_event("success", "process_page", {"page_number": count_page, "artifacts_processed": artifact_counter -1 })
     pbar.update(1)
 
 def main():
     """Main function to start the scraping process."""
     global logger
     logger = setup_logging()
+    all_artifacts_data = []
+
+    processed_pages, failed_pages = analyze_logs(config["log_dir"])
+    remaining_pages = [p for p in range(1, total_pages + 1) if p not in processed_pages]
     
+    if not remaining_pages:
+        log_event("info", "completed", {"message": "All pages have already been processed."})
+        print("All pages have already been processed.")
+        return
+
     with ThreadPoolExecutor(max_workers=len(proxy_list)) as executor:
         futures = []
-        page_counter = 1
-        with tqdm(total=total_pages, desc="Processing Pages") as pbar:
+        page_counter = remaining_pages[0] 
+        with tqdm(initial=len(processed_pages), total=total_pages, desc="Processing Pages") as pbar:
             while page_counter <= total_pages:
                 for i in range(len(proxy_list)):
-                    if page_counter <= total_pages:
-                        future = executor.submit(process_page, proxy_list[i], page_counter, pbar)
+                    if page_counter <= total_pages and page_counter not in processed_pages:
+                        future = executor.submit(process_page, proxy_list[i], page_counter, pbar, all_artifacts_data)
                         futures.append(future)
+                        page_counter += 1
+                    elif page_counter in processed_pages:
                         page_counter += 1
 
             for future in as_completed(futures):
                 future.result()
 
+    # Save all artifact data to a single JSON file
+    with open(os.path.join(json_folder, "all_artifacts_data.json"), "w", encoding="utf-8") as file:
+        json.dump(all_artifacts_data, file, indent=4, ensure_ascii=False)
+    log_event("info", "save_data", {"message": "All artifacts data saved to all_artifacts_data.json"})
+
 def help_command():
     """
-    Prints out a list of available commands, their descriptions, and Docker instructions.
-    Also includes explanations in English.
+    Prints a concise help message with essential information.
     """
     help_text = """
 ## **Met Museum Artifact Scraper**
 
-This script scrapes artifact data from the Metropolitan Museum of Art website.
+This script retrieves artifact information from the Metropolitan Museum of Art website.
 
-### **Available Commands:**
+### **Quick Start:**
 
-| Command | Description | Description in English                                                                                                                               |
-|---|---|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `run` | Executes the main scraping process. | Executes the main scraping process.                                                                                                                    |
-| `help` | Displays this help message with available commands and Docker instructions. | Displays this help message with available commands, their descriptions, and Docker instructions.                                                    |
+**1. Docker Compose (Recommended):**
 
----
+*   **Build:** `docker-compose build`
+*   **Run (detached):** `docker-compose up -d`
+*   **Execute script:**
+    *   `run`: `docker exec -it metmuseum_scraper python Main_v4.py run`
+    *   `help`: `docker exec -it metmuseum_scraper python Main_v4.py help`
 
-### **Functions:**
+**2. Run Script Directly (Without Docker):**
 
-| Function                                     | Description                                                                               | Description in English                                                                                                                                 |
-|----------------------------------------------|-------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `process_page(proxy, count_page, pbar)`      | Fetches and processes a specific page of artifacts.                                        | Fetches and processes a specific page of artifacts, extracting details and downloading related images.                                            |
-| `get_session(proxy)`                         | Creates and returns a requests.Session object configured with the provided proxy.          | Creates and returns a requests.Session object configured with the provided proxy settings for making HTTP requests.                                   |
-| `setup_logging()`                            | Configures and returns a logger for logging application messages.                           | Configures and returns a logger for logging application messages, including errors, warnings, and informational messages.                            |
-| `handle_interrupt(signal_received, frame)`   | Handles interruptions (e.g., Ctrl+C) gracefully, ensuring data is saved.                   | Handles interruptions (e.g., Ctrl+C or SIGINT) gracefully, ensuring that any data being processed is saved before the script exits.                |
-| `main()`                                     | Entry point of the application. Manages concurrent page processing using ThreadPoolExecutor. | Entry point of the application. Manages concurrent processing of multiple pages using ThreadPoolExecutor to speed up the data fetching process.   |
-| `load_config(config_path="config.yaml")`     | Loads the configuration from a YAML file.                                                 | Loads the configuration settings from a YAML file (default: `config.yaml`), setting up parameters like URLs, headers, proxies, etc.              |
-| `create_gitignore(folder_path)`              | Creates a .gitignore file in the specified folder.                                       | Creates a .gitignore file in the specified folder to ignore all files except the .gitignore itself, useful for excluding downloaded images from Git. |
+*   **Run scraper:** `python Main_v4.py run`
+*   **Help:** `python Main_v4.py help`
 
----
+### **Commands:**
 
-### **Docker Instructions:**
+| Command | Description                                                                 |
+| :------ | :-------------------------------------------------------------------------- |
+| `run`   | Starts the scraping process.                                                |
+| `help`  | Shows this help message with command and function details, plus Docker use. |
 
-1. **Build the Docker image:**
+### **Key Functions:**
 
-    ```bash
-    docker-compose build
-    ```
+| Function                                 | Description                                                                                      |
+| :--------------------------------------- | :----------------------------------------------------------------------------------------------- |
+| `process_page(proxy, ...)`               | Fetches and processes a single page of artifacts.                                                |
+| `get_session(proxy)`                     | Creates a requests session with a specified proxy.                                               |
+| `setup_logging()`                        | Sets up logging to record events.                                                                |
+| `handle_interrupt(...)`                  | Gracefully handles Ctrl+C to save progress.                                                      |
+| `main()`                                 | The main function that orchestrates the scraping.                                                |
+| `load_config(...)`                       | Loads settings from `config.yaml`.                                                               |
+| `create_gitignore(...)`                  | Creates a `.gitignore` in image folders to exclude them from Git.                                |
+| `log_event(...)`                         | Logs events (success, failure, etc.) with details.                                               |
+| `analyze_logs(...)`                      | Analyzes logs to track processed and failed pages, enabling resume functionality.                |
 
-2. **Start the container in detached mode:**
+### **Important Notes:**
 
-    ```bash
-    docker-compose up -d
-    ```
-
-3. **Execute the script inside the container:**
-    *   **Using the `run` command:**
-        ```bash
-        docker exec -it metmuseum_scraper python Main_v4.py run
-        ```
-    *   **Using the `help` command:**
-    ```bash
-        docker exec -it metmuseum_scraper python Main_v4.py help
-    ```
-    **Note:** Replace `metmuseum_scraper` with the actual name of your container if it's different. You can find the container name using `docker ps`.
-
----
-
-### **Example Usage (without Docker):**
-
-1. **To run the scraper:**
-
-    ```bash
-    python Main_v4.py run
-    ```
-
-2. **To see this help message:**
-
-    ```bash
-    python Main_v4.py help
-    ```
-
----
-
-**Important Notes:**
-
-*   The script uses multiple proxies to avoid being blocked. (Uses multiple proxies to avoid IP blocking)
-*   Logs are saved in the `Logs` directory. (Logs are saved in the directory specified in `config.yaml` or `Logs` by default)
-*   Scraped data (JSON and images) is saved in the `Save_Data/Arts_Data` directory. (Scraped data, including JSON files and images, is saved in the directory specified in `config.yaml` or `Save_Data/Arts_Data` by default)
-*   The script handles interruptions gracefully. Press Ctrl+C to stop it, and it will save the progress. (Handles interruptions like Ctrl+C gracefully. Press Ctrl+C to stop, and it will attempt to save current progress)
-*   Make sure you have Docker and Docker Compose installed if you want to use the Docker method. (Ensure Docker and Docker Compose are installed for Docker usage)
-*   Configuration is loaded from `config.yaml`. (Configuration parameters are loaded from `config.yaml`)
-*   Each folder with images will have a .gitignore file to prevent accidental commits of images to a Git repository. (A .gitignore file is created in each image folder to prevent images from being tracked by Git)
+*   Uses multiple proxies (configure in `config.yaml`).
+*   Logs are saved in the `Logs` directory (or as set in `config.yaml`).
+*   Output (JSON and images) goes to `Save_Data/Arts_Data` (or as set in `config.yaml`).
+*   Handles Ctrl+C to save progress before exiting.
+*   Configuration is from `config.yaml`.
+*   Image folders have `.gitignore` to prevent accidental Git commits.
+*   Make sure you have Docker and Docker Compose installed if you want to use the Docker method.
+*   Each folder with images will have a .gitignore file to prevent accidental commits of images to a Git repository.
+*   Analyzes log files to determine which pages have been processed or failed, allowing the script to resume from where it left off.
+*   Creates a .gitignore file in the specified folder to ignore all files except the .gitignore itself, useful for excluding downloaded images from Git.
+*   Loads the configuration settings from a YAML file (default: `config.yaml`), setting up parameters like URLs, headers, proxies, etc.
+*   Entry point of the application. Manages concurrent processing of multiple pages using ThreadPoolExecutor to speed up the data fetching process.
+*   Handles interruptions (e.g., Ctrl+C or SIGINT) gracefully, ensuring that any data being processed is saved before the script exits.
+*   Configures and returns a logger for logging application messages, including errors, warnings, and informational messages.
+*   Creates and returns a requests.Session object configured with the provided proxy settings for making HTTP requests.
+*   Fetches and processes a specific page of artifacts, extracting details and downloading related images.
+*   Displays this help message with available commands, their descriptions, and Docker instructions.
+*   Executes the main scraping process.
     """
     print(help_text)
 
@@ -354,7 +367,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    
+
     load_config()
 
     if args.command == "help":
